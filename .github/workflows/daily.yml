@@ -1,0 +1,26 @@
+name: Daily index valuation
+
+on:
+  schedule:
+    # 每个工作日 UTC 09:00 = 北京 17:00（A 股收盘后约 1.5 小时，估值数据已更新）
+    - cron: "0 9 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Fetch & push
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          SHEET_NAME: 指数价格
+        run: python fetch_index_valuation.py
