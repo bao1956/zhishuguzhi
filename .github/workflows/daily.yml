@@ -2,8 +2,9 @@ name: Daily index valuation
 
 on:
   schedule:
-    # 每个工作日 UTC 09:00 = 北京 17:00（A 股收盘后约 1.5 小时，估值数据已更新）
-    - cron: "0 9 * * 1-5"
+    # 每个工作日 UTC 09/11/13 各跑一次（北京 17/19/21 点），多个错峰入口防止 GitHub 丢调度。
+    # 写入按「日期+代码」合并，多跑几次只会覆盖同一行，幂等无副作用。
+    - cron: "0 9,11,13 * * 1-5"
   workflow_dispatch: {}
 
 jobs:
