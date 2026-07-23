@@ -135,6 +135,52 @@ function _resp(obj) {
 }
 
 /**
+ * 一次性/可重跑：把「指数价格」总表按代码拆到 7 个分表 tab。
+ * 在 Apps Script 编辑器里选中本函数点「运行」即可（无需重新部署）。
+ * 分表不存在则创建；已存在则 clearContents 后全量重建（幂等）。
+ * tab 名与 fetch_index_valuation.py 的 INDEX_TABS 保持一致。
+ */
+function migrateSplitTabs() {
+  const SPLIT_TABS = {
+    "SH000300": "沪深300",
+    "SH000905": "中证500",
+    "SH000852": "中证1000",
+    "SZ399006": "创业板",
+    "SH000015": "上证红利",
+    "SH000922": "中证红利",
+    "CSIH30269": "红利低波"
+  };
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const src = ss.getSheetByName("指数价格");
+  if (!src) throw new Error("总表「指数价格」不存在");
+  const data = src.getDataRange().getValues();
+  const header = data[0];
+  const codeIdx = header.indexOf("代码");
+  if (codeIdx === -1) throw new Error("总表缺少「代码」列");
+
+  Object.keys(SPLIT_TABS).forEach(code => {
+    const tabName = SPLIT_TABS[code];
+    let sheet = ss.getSheetByName(tabName);
+    if (!sheet) sheet = ss.insertSheet(tabName);
+    sheet.clearContents();
+    const rows = data.slice(1).filter(r => String(r[codeIdx]).trim() === code);
+    sheet.getRange(1, 1, 1, header.length).setValues([header]);
+    if (rows.length > 0) {
+      sheet.getRange(2, 1, rows.length, header.length).setValues(rows);
+    }
+    // getValues 读出的百分比是纯数字，写回新 tab 会丢显示格式，必须显式补格式
+    if (rows.length > 0) {
+      sheet.getRange(2, 1, rows.length, 1).setNumberFormat("yyyy/m/d");
+      ["PE 百分位", "PB 百分位", "股息率", "有知有行股息率"].forEach(function(colName) {
+        const ci = header.indexOf(colName);
+        if (ci !== -1) sheet.getRange(2, ci + 1, rows.length, 1).setNumberFormat("0.00%");
+      });
+    }
+    Logger.log(tabName + ": " + rows.length + " 行");
+  });
+}
+
+/**
  * 把单元格值归一化成稳定的字符串，用于 keyCols 匹配。
  * 关键：Sheets 把 "2026/4/27" 这种字符串自动转成 Date 存储，
  *       读回时是 Date 对象，必须先格式化成同样的 yyyy/M/d 才能匹配传入字符串。

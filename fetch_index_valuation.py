@@ -26,6 +26,18 @@ INDEX_CODES = [
     "CSIH30269",  # 红利低波
 ]
 
+# 每个指数各自的分表 tab 名（与 Apps Script migrateSplitTabs 的 SPLIT_TABS 保持一致）。
+# 除写入 SHEET_NAME 总表外，每个指数的行还会单独推到自己的 tab。
+INDEX_TABS = {
+    "SH000300": "沪深300",
+    "SH000905": "中证500",
+    "SH000852": "中证1000",
+    "SZ399006": "创业板",
+    "SH000015": "上证红利",
+    "SH000922": "中证红利",
+    "CSIH30269": "红利低波",
+}
+
 YZYX_CODE = {
     "SH000300": "000300.SH",
     "SH000905": "000905.SH",
@@ -136,6 +148,7 @@ def main() -> int:
     sheet_name = os.environ.get("SHEET_NAME", "指数价格").strip() or "指数价格"
 
     rows = []
+    tab_rows = []  # (分表 tab 名, row)
     for code in INDEX_CODES:
         try:
             snap = fetch_danjuan(code)
@@ -153,6 +166,8 @@ def main() -> int:
 
         row = build_row(snap, yzyx)
         rows.append(row)
+        if code in INDEX_TABS:
+            tab_rows.append((INDEX_TABS[code], row))
         print("  " + "\t".join(row))
 
     if not rows:
@@ -169,6 +184,22 @@ def main() -> int:
     except Exception as e:
         print(f"[FATAL] Webhook 异常: {e}", file=sys.stderr)
         return 4
+
+    # 再逐指数写各自的分表 tab（tab 需已存在，见 apps_script.gs 的 migrateSplitTabs）
+    failures = 0
+    for tab, row in tab_rows:
+        try:
+            result = post_webhook(webhook_url, tab, [row])
+            print(f"  分表「{tab}」: {result}", file=sys.stderr)
+            if result.get("status") != "ok":
+                failures += 1
+        except Exception as e:
+            print(f"[ERROR] 分表「{tab}」写入失败: {e}", file=sys.stderr)
+            failures += 1
+
+    if failures:
+        print(f"[FATAL] {failures} 个分表写入失败", file=sys.stderr)
+        return 5
 
     return 0
 
