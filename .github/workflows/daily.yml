@@ -5,7 +5,16 @@ on:
     # 每个工作日 UTC 09/11/13 各跑一次（北京 17/19/21 点），多个错峰入口防止 GitHub 丢调度。
     # 写入按「日期+代码」合并，多跑几次只会覆盖同一行，幂等无副作用。
     - cron: "0 9,11,13 * * 1-5"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      push_all:
+        description: "全量推送 temps.json（回填/修复用，填 1）"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - temps.json
 
 jobs:
   fetch:
@@ -21,7 +30,14 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Fetch & push
+        if: github.event_name != 'push'
         env:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           SHEET_NAME: 指数价格
         run: python fetch_index_valuation.py
+
+      - name: Push 大V温度到 Sheet
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          PUSH_ALL: ${{ github.event.inputs.push_all }}
+        run: python push_temps.py
