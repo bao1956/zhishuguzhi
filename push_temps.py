@@ -47,11 +47,18 @@ def post_webhook(webhook_url: str, sheet_name: str, rows: list) -> dict:
         "rows": rows,
     }
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        webhook_url, data=body,
-        headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    last_err = None
+    for attempt in range(3):
+        req = urllib.request.Request(
+            webhook_url, data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=240) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:  # 写入幂等，超时/瞬断直接重试
+            last_err = e
+            print(f"  [retry {attempt + 1}/3] {sheet_name}: {e}", file=sys.stderr)
+    raise last_err
 
 
 def main() -> int:
