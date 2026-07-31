@@ -33,7 +33,7 @@ CST = timezone(timedelta(hours=8))
 CODE = "SH000922"
 NAME = "中证红利"
 STOCK_CODE = "000922"     # 开放平台侧的指数代码
-COLUMN = "理性仁"
+COLUMN = "理杏仁"
 MAIN_TAB = "指数价格"
 SPLIT_TAB = "中证红利"
 
