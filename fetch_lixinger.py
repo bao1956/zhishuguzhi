@@ -1,8 +1,11 @@
-"""理杏仁「等权股息率」(dyr.ew) → Google Sheet 各指数分表 + 总表「理杏仁」列。
+"""理杏仁「等权股息率」(dyr.ew) + 「5年分位点」(dyr.y5.ew.cvpos)
+→ Google Sheet 各指数分表 + 总表「理杏仁」「理杏仁分位点」两列。
 
 数据源：理杏仁开放平台 POST https://open.lixinger.com/api/cn/index/fundamental
-  指标 dyr.ew = 等权股息率，与网页图表「股息率 · 等权」完全同口径
-  （已用网页接口 /api/ii/price-metrics/get-price-metrics-chart-info 逐日核对）。
+  dyr.ew          = 股息率·等权口径，与网页图表「股息率 · 等权」完全同口径
+  dyr.y5.ew.cvpos = 该股息率在过去 5 年窗口内的分位点（0~1，越高越贵）
+  （已用网页接口 /api/ii/price-metrics/get-price-metrics-chart-info 逐日核对，
+   分位点窗口固定 5 年，与理杏仁网页默认展示的窗口可能不同，注意甄别）。
 
 覆盖指数（INDICES，2026-07-31 由中证红利扩展为三个）：
   中证红利(SH000922) / 红利低波(CSIH30269) —— 复用现有总表+分表机制；
@@ -45,7 +48,8 @@ RECENT_DAYS = 14
 CST = timezone(timedelta(hours=8))
 
 MAIN_TAB = "指数价格"
-COLUMN = "理杏仁"
+COL_DYR = "理杏仁"
+COL_POS = "理杏仁分位点"
 KEY_COLS = ["日期", "代码"]
 
 # code: 表内「代码」列取值（与蛋卷/现有分表口径对齐，无先例的新指数直接用官方代码）
@@ -76,7 +80,7 @@ def fetch_open_api(token: str, stock_code: str, start: str, end: str) -> list[li
         "startDate": start,
         "endDate": end,
         "stockCodes": [stock_code],
-        "metricsList": ["dyr.ew"],
+        "metricsList": ["dyr.ew", "dyr.y5.ew.cvpos"],
     }, timeout=30)
     r.raise_for_status()
     payload = r.json()
@@ -87,11 +91,10 @@ def fetch_open_api(token: str, stock_code: str, start: str, end: str) -> list[li
     rows = []
     for it in items:
         v = it.get("dyr.ew")
-        if v is None and isinstance(it.get("dyr"), dict):
-            v = it["dyr"].get("ew")
         if v is None:
             continue
-        rows.append([to_sheet_date(it["date"]), v])
+        pos = it.get("dyr.y5.ew.cvpos")
+        rows.append([to_sheet_date(it["date"]), v, pos])
     return rows
 
 
@@ -106,7 +109,7 @@ def post_webhook(webhook_url: str, sheet_name: str, rows: list,
                  delete_keys: list | None = None) -> dict:
     payload = {
         "sheetName": sheet_name,
-        "headers": ["日期", "代码", "名称", COLUMN],
+        "headers": ["日期", "代码", "名称", COL_DYR, COL_POS],
         "keyCols": KEY_COLS,
         "rows": rows,
         "appendMode": "tailOnly",
@@ -134,8 +137,12 @@ def process_index(webhook_url: str, idx: dict, pairs: list[list]) -> int:
         return 0
 
     pairs.sort(key=lambda p: tuple(int(x) for x in p[0].split("/")))
-    rows = [[d, idx["code"], idx["name"], f"{v * 100:.2f}%"] for d, v in pairs]
-    print(f"[{idx['name']}] {rows[0][0]} {rows[0][3]} ... {rows[-1][0]} {rows[-1][3]}", file=sys.stderr)
+    rows = [
+        [d, idx["code"], idx["name"], f"{v * 100:.2f}%", f"{pos * 100:.2f}%" if pos is not None else ""]
+        for d, v, pos in pairs
+    ]
+    print(f"[{idx['name']}] {rows[0][0]} {rows[0][3]}/{rows[0][4]} ... {rows[-1][0]} {rows[-1][3]}/{rows[-1][4]}",
+          file=sys.stderr)
 
     tabs = (MAIN_TAB, idx["tab"]) if idx["write_main"] else (idx["tab"],)
     failures = 0
