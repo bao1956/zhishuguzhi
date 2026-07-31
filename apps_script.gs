@@ -16,6 +16,12 @@
  *       命中 → 仅用"非空"传入值覆盖对应单元格（空值不会清掉旧数据）
  *       未命中 → 追加到末尾
  *   - 表头如有新增列，追加到表头末尾（保留旧列顺序）
+ *
+ * 可选字段：
+ *   - appendMode: "tailOnly" → 未命中的行只有当其「日期」>= 表内现有最大日期时才追加，
+ *     否则计入 skipped 丢弃。保证日期只能在表尾累加，绝不在末尾插入乱序的历史日期。
+ *   - deleteKeys: [[keyVal,...], ...] → 按 keyCols 精确匹配删除整行（自底向上），
+ *     发生在 upsert 之前；配 rows:[] 可作纯清理调用。
  */
 
 function doPost(e) {
@@ -35,6 +41,23 @@ function doPost(e) {
     if (!sheet) {
       // 严格模式：不存在直接报错，绝不创建新 tab，避免误动其他 sheet
       return _resp({status: "error", message: "tab 「" + sheetName + "」 不存在；请先在 Sheet 中创建该 tab，或检查 SHEET_NAME 是否拼写正确"});
+    }
+
+    const appendMode = data.appendMode || "";
+    const deleteKeys = data.deleteKeys || [];
+
+    // 删除阶段：按 keyCols 精确匹配整行删除（自底向上保证行号有效）
+    let deleted = 0;
+    if (deleteKeys.length > 0 && sheet.getLastRow() > 1) {
+      const all = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn()).getValues();
+      const hci = {};
+      all[0].forEach((h, i) => { hci[h] = i; });
+      const wanted = {};
+      deleteKeys.forEach(k => { wanted[k.map(v => String(v).trim()).join("|")] = true; });
+      for (let r = all.length - 1; r >= 1; r--) {
+        const key = keyCols.map(kc => _toKeyVal(all[r][hci[kc]])).join("|");
+        if (wanted[key]) { sheet.deleteRow(r + 1); deleted++; }
+      }
     }
 
     // 读取现有数据
@@ -79,8 +102,19 @@ function doPost(e) {
       keyToIdx[key] = r;
     }
 
+    // tailOnly 守卫：算出表内现有最大日期
+    let maxDateMs = -Infinity;
+    const dateColIdx = colIdx["日期"];
+    if (appendMode === "tailOnly" && dateColIdx !== undefined) {
+      for (let r = 1; r < existing.length; r++) {
+        const t = _toDateMs(existing[r][dateColIdx]);
+        if (t !== null && t > maxDateMs) maxDateMs = t;
+      }
+    }
+
     let updated = 0;
     let appended = 0;
+    let skipped = 0;
     const toAppend = [];
 
     rows.forEach(row => {
@@ -107,6 +141,11 @@ function doPost(e) {
           updated++;
         }
       } else {
+        if (appendMode === "tailOnly" && dateColIdx !== undefined) {
+          const t = _toDateMs(rowObj["日期"]);
+          if (t === null || t < maxDateMs) { skipped++; return; }
+          if (t > maxDateMs) maxDateMs = t;
+        }
         const newRow = new Array(existingHeader.length).fill("");
         headers.forEach((h, i) => { newRow[colIdx[h]] = row[i]; });
         toAppend.push(newRow);
@@ -118,7 +157,7 @@ function doPost(e) {
       sheet.getRange(sheet.getLastRow() + 1, 1, toAppend.length, existingHeader.length).setValues(toAppend);
     }
 
-    return _resp({status: "ok", sheet: sheetName, updated: updated, appended: appended});
+    return _resp({status: "ok", sheet: sheetName, updated: updated, appended: appended, skipped: skipped, deleted: deleted});
   } catch (err) {
     return _resp({status: "error", message: String(err)});
   }
@@ -191,4 +230,16 @@ function _toKeyVal(v) {
     return Utilities.formatDate(v, "Asia/Shanghai", "yyyy/M/d");
   }
   return String(v).trim();
+}
+
+/**
+ * 把日期单元格值（Date 对象或 "yyyy/M/d" 字符串）归一化成毫秒时间戳；解析失败返回 null。
+ * tailOnly 守卫用它比较日期先后。
+ */
+function _toDateMs(v) {
+  if (v === null || v === undefined || v === "") return null;
+  if (Object.prototype.toString.call(v) === "[object Date]") return v.getTime();
+  const m = String(v).trim().match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if (!m) return null;
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime();
 }

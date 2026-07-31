@@ -19,6 +19,10 @@ on:
         description: "理杏仁增量起始日 YYYY-MM-DD（区间修复用）"
         required: false
         default: ""
+      lxr_delete_dates:
+        description: "按日期删除中证红利行（yyyy/M/d 逗号分隔，清理乱序行用）"
+        required: false
+        default: ""
   push:
     branches: [main]
     paths:
@@ -57,4 +61,5 @@ jobs:
           LIXINGER_TOKEN: ${{ secrets.LIXINGER_TOKEN }}
           LXR_BACKFILL: ${{ github.event.inputs.lxr_backfill }}
           LXR_START_DATE: ${{ github.event.inputs.lxr_start_date }}
+          LXR_DELETE_DATES: ${{ github.event.inputs.lxr_delete_dates }}
         run: python fetch_lixinger.py

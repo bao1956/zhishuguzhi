@@ -10,12 +10,19 @@
   2) 文件回填：LXR_BACKFILL=1 时改读 lixinger_backfill.json（2026-07-30 用网页
      登录态一次性导出的历史数据），无需 token，workflow_dispatch 手动触发用。
 
+写入约束：所有推送都带 appendMode="tailOnly"——只更新表内已有日期的行；
+未命中的行仅当日期 >= 表内最大日期才允许追加（即只能在表尾累加），
+历史缺失日（如 2026/5/8，当天整条流水线调度被丢）一律 skipped，
+绝不会在表尾插出乱序的旧日期行。
+
 环境变量：
-  WEBHOOK_URL      Apps Script Web App 地址（必填）
-  LIXINGER_TOKEN   开放平台 token（日常增量必填；缺失时打印警告退出 0，
-                   避免 secret 未配置期间把整个 daily workflow 打红）
-  LXR_BACKFILL     "1"/"true" 走文件回填模式
-  LXR_START_DATE   增量起始日 YYYY-MM-DD（默认今天-14 天，区间修复用）
+  WEBHOOK_URL       Apps Script Web App 地址（必填）
+  LIXINGER_TOKEN    开放平台 token（日常增量必填；缺失时打印警告退出 0，
+                    避免 secret 未配置期间把整个 daily workflow 打红）
+  LXR_BACKFILL      "1"/"true" 走文件回填模式
+  LXR_START_DATE    增量起始日 YYYY-MM-DD（默认今天-14 天，区间修复用）
+  LXR_DELETE_DATES  逗号分隔的 yyyy/M/d 列表：按「日期+代码」删除两 tab 中的整行
+                    （一次性清理误追加的乱序行用），设了它就只做删除不做推送
 """
 
 import json
@@ -82,13 +89,17 @@ def load_backfill() -> list[list]:
         return json.load(f)["values"]
 
 
-def post_webhook(webhook_url: str, sheet_name: str, rows: list) -> dict:
+def post_webhook(webhook_url: str, sheet_name: str, rows: list,
+                 delete_keys: list | None = None) -> dict:
     payload = {
         "sheetName": sheet_name,
         "headers": COLUMNS,
         "keyCols": KEY_COLS,
         "rows": rows,
+        "appendMode": "tailOnly",
     }
+    if delete_keys:
+        payload["deleteKeys"] = delete_keys
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     last_err = None
     for attempt in range(3):
@@ -109,6 +120,22 @@ def main() -> int:
     if not webhook_url:
         print("[FATAL] 缺少 WEBHOOK_URL", file=sys.stderr)
         return 2
+
+    delete_dates = [d.strip() for d in os.environ.get("LXR_DELETE_DATES", "").split(",") if d.strip()]
+    if delete_dates:
+        delete_keys = [[d, CODE] for d in delete_dates]
+        print(f"删除模式：{delete_keys}", file=sys.stderr)
+        failures = 0
+        for tab in (MAIN_TAB, SPLIT_TAB):
+            try:
+                result = post_webhook(webhook_url, tab, [], delete_keys=delete_keys)
+                print(f"  「{tab}」: {result}", file=sys.stderr)
+                if result.get("status") != "ok":
+                    failures += 1
+            except Exception as e:
+                print(f"[ERROR] 「{tab}」删除失败: {e}", file=sys.stderr)
+                failures += 1
+        return 5 if failures else 0
 
     backfill = os.environ.get("LXR_BACKFILL", "").strip().lower() in ("1", "true", "yes")
     if backfill:
