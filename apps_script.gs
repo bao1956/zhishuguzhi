@@ -178,6 +178,8 @@ function _resp(obj) {
  * 在 Apps Script 编辑器里选中本函数点「运行」即可（无需重新部署）。
  * 分表不存在则创建；已存在则 clearContents 后全量重建（幂等）。
  * tab 名与 fetch_index_valuation.py 的 INDEX_TABS 保持一致。
+ * 注意：重跑本函数会清掉 setupDividendStats() 装的第 2/3 行统计行，
+ *       跑完必须再跑一次 setupDividendStats() 复位（它会自愈重装）。
  */
 function migrateSplitTabs() {
   const SPLIT_TABS = {
@@ -217,6 +219,120 @@ function migrateSplitTabs() {
     }
     Logger.log(tabName + ": " + rows.length + " 行");
   });
+}
+
+/**
+ * 一次性/可重跑：给 4 个红利分表（上证红利/中证红利/红利低波/红利低波100）装
+ * 「最新 vs 历史极值」统计行 + 全列最大/最小值自动高亮。
+ * 在 Apps Script 编辑器里选中本函数点「运行」即可（无需重新部署）。
+ *
+ * 做的事（幂等，可反复运行修复/扩列）：
+ *   1. 表头下插入两行常驻统计行（第 2/3 行，数据从第 4 行开始）：
+ *        第2行「最新-历史最高」= 该列最新一天的值 − 全列历史最高（负数 = 比最高点低多少个百分点）
+ *        第3行「最新-历史最低」= 该列最新一天的值 − 全列历史最低（正数 = 比最低点高多少个百分点）
+ *      覆盖列：股息率 / 有知有行股息率 / 理杏仁（表头存在就装，空列显示空、来数自动生效）。
+ *      公式用 4:末 开放区间引用整列数据，新追加的行自动纳入计算；
+ *      而日更（蛋卷/理杏仁/大V温度）全部按「日期+代码」upsert、新行只追加到表尾，
+ *      这两行日期列放的是文字标签、没有代码键，永远不会被 webhook 命中或覆盖。
+ *   2. 上述每列装两条条件格式：全列最大值黄底、最小值蓝底，数据一变自动重算重标。
+ *      规则区间铺到第 5000 行并把网格先扩到 5000 行（日频 ≈ 2045 年才用满），
+ *      保证日更追加的新行永远落在规则区间内、不会因网格扩容脱标。
+ *   3. 冻结前 3 行，滚动看历史时表头 + 统计行常驻。
+ */
+function setupDividendStats() {
+  const TABS = ["上证红利", "中证红利", "红利低波", "红利低波100"];
+  const YIELD_COLS = ["股息率", "有知有行股息率", "理杏仁"];
+  const LABEL_HIGH = "最新-历史最高";
+  const LABEL_LOW = "最新-历史最低";
+  const DATA_START = 4;   // 第 2/3 行是统计行，数据从第 4 行开始
+  const GRID_ROWS = 5000; // 条件格式规则铺到的行数
+  const YELLOW = "#ffff00";
+  const BLUE = "#6fa8dc";
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  TABS.forEach(function(tabName) {
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) {
+      Logger.log(tabName + ": tab 不存在，跳过");
+      return;
+    }
+
+    // 1) 幂等插入统计行：A2 已是标签说明装过，只刷新公式与规则
+    if (String(sheet.getRange(2, 1).getValue()).trim() !== LABEL_HIGH) {
+      sheet.insertRowsBefore(2, 2);
+      // 防止继承表头/日期格式；顺带清掉 migrateSplitTabs 重建后漂移到数据行的旧注释
+      sheet.getRange(2, 1, 2, sheet.getMaxColumns()).clearFormat();
+      sheet.getRange(4, 1, 2, 1).clearNote();
+      sheet.getRange(2, 1).setValue(LABEL_HIGH);
+      sheet.getRange(3, 1).setValue(LABEL_LOW);
+    }
+    sheet.getRange(2, 1, 2, 1).setFontWeight("bold");
+    sheet.getRange(2, 1).setNote("该列最新一天的股息率 − 全部历史最高值（负数 = 比最高点低多少个百分点）");
+    sheet.getRange(3, 1).setNote("该列最新一天的股息率 − 全部历史最低值（正数 = 比最低点高多少个百分点）");
+
+    // 网格扩到 GRID_ROWS，保证日更追加的新行始终落在条件格式区间内
+    if (sheet.getMaxRows() < GRID_ROWS) {
+      sheet.insertRowsAfter(sheet.getMaxRows(), GRID_ROWS - sheet.getMaxRows());
+    }
+
+    const header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+
+    // 2) 逐股息率列装统计公式，并重建极值高亮规则（先摘掉旧装的，保留无关规则）。
+    //    表头存在就装：暂时没数据的列（如刚扩列还没回填的理杏仁）公式经 IFERROR 显示空、
+    //    高亮对空单元格恒不命中，数据一到自动生效，无需重跑。
+    const keptRules = sheet.getConditionalFormatRules().filter(function(r) {
+      return !_isExtremeRule(r);
+    });
+    const newRules = [];
+    YIELD_COLS.forEach(function(colName) {
+      const ci = header.indexOf(colName);
+      if (ci === -1) {
+        Logger.log(tabName + " / " + colName + ": 表头无此列，跳过");
+        return;
+      }
+      const n = ci + 1;
+      const L = _colLetter(n);
+      const open = L + "$" + DATA_START + ":" + L; // 开放区间，新追加的行自动纳入
+      // 该列最后一个非空值 = 最新一天；范围运算必须套 ARRAYFORMULA，裸 LOOKUP 会被隐式交集打成 #N/A
+      const latest = 'ARRAYFORMULA(LOOKUP(2,1/(' + open + '<>""),' + open + '))';
+      sheet.getRange(2, n).setFormula("=IFERROR(" + latest + "-MAX(" + open + '),"")');
+      sheet.getRange(3, n).setFormula("=IFERROR(" + latest + "-MIN(" + open + '),"")');
+      sheet.getRange(2, n, 2, 1).setNumberFormat("0.00%");
+
+      const cell = L + DATA_START;
+      const ruleRange = sheet.getRange(cell + ":" + L + sheet.getMaxRows());
+      newRules.push(SpreadsheetApp.newConditionalFormatRule()
+        .whenFormulaSatisfied('=AND(' + cell + '<>"",' + cell + '=MAX(' + open + '))')
+        .setBackground(YELLOW).setRanges([ruleRange]).build());
+      newRules.push(SpreadsheetApp.newConditionalFormatRule()
+        .whenFormulaSatisfied('=AND(' + cell + '<>"",' + cell + '=MIN(' + open + '))')
+        .setBackground(BLUE).setRanges([ruleRange]).build());
+      Logger.log(tabName + " / " + colName + "（" + L + " 列）: 统计行 + 高亮已装");
+    });
+    sheet.setConditionalFormatRules(keptRules.concat(newRules));
+
+    // 3) 表头 + 统计行常驻
+    sheet.setFrozenRows(3);
+  });
+}
+
+/** 识别 setupDividendStats 装的极值高亮规则（自定义公式同时含 "$4:" 和 MAX(/MIN(），幂等重装时先摘除。 */
+function _isExtremeRule(rule) {
+  const bc = rule.getBooleanCondition();
+  if (!bc || bc.getCriteriaType() !== SpreadsheetApp.BooleanCriteria.CUSTOM_FORMULA) return false;
+  const vals = bc.getCriteriaValues();
+  const f = vals && vals.length ? String(vals[0]) : "";
+  return f.indexOf("$4:") !== -1 && (f.indexOf("MAX(") !== -1 || f.indexOf("MIN(") !== -1);
+}
+
+/** 1-based 列号 → 字母（A..Z, AA..） */
+function _colLetter(n) {
+  let s = "";
+  while (n > 0) {
+    s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
 }
 
 /**
