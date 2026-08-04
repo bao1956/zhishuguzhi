@@ -12,20 +12,27 @@ jobs:
           LIXINGER_TOKEN: ${{ secrets.LIXINGER_TOKEN }}
         run: |
           python - <<'EOF'
-          import json, os, urllib.request
+          import gzip, json, os, urllib.request
 
           TOKEN = os.environ["LIXINGER_TOKEN"].strip()
+
+          def read_body(resp):
+              raw = resp.read()
+              if resp.headers.get("Content-Encoding") == "gzip":
+                  raw = gzip.decompress(raw)
+              return raw.decode()
 
           def post(url, payload):
               payload["token"] = TOKEN
               req = urllib.request.Request(
                   url, data=json.dumps(payload).encode(),
-                  headers={"Content-Type": "application/json"}, method="POST")
+                  headers={"Content-Type": "application/json",
+                           "Accept-Encoding": "gzip"}, method="POST")
               try:
                   with urllib.request.urlopen(req, timeout=30) as r:
-                      return json.loads(r.read().decode())
+                      return json.loads(read_body(r))
               except urllib.error.HTTPError as e:
-                  return {"httpError": e.code, "body": e.read().decode()[:300]}
+                  return {"httpError": e.code, "body": read_body(e)[:300]}
 
           # 1) 指数级两融：四个红利指数 + 上证50 对照
           for code, name in [("000016", "上证50(对照)"), ("000015", "上证红利"),
