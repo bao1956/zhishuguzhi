@@ -238,8 +238,9 @@ function migrateSplitTabs() {
 }
 
 /**
- * 一次性/可重跑：给 4 个红利分表（上证红利/中证红利/红利低波/红利低波100）装
- * 「最新 vs 历史极值」统计行（钉在表尾、最新数据之后）+ 全列最大/最小值自动高亮。
+ * 一次性/可重跑：给 8 个指数分表装「最新 vs 历史极值」统计行（钉在表尾、最新数据之后）
+ * + 全列最大/最小值自动高亮。覆盖列按 TAB_COLS 区分：红利4分表=股息率3列+两融2列，
+ * 宽基/创业板4分表（沪深300/中证500/中证1000/创业板）只做两融2列。
  * 在 Apps Script 编辑器里选中本函数点「运行」即可；但配套的「新行插到统计行之前」
  * 逻辑在 doPost 里，doPost 有改动时必须重新部署 Web App 才对线上生效。
  *
@@ -247,7 +248,7 @@ function migrateSplitTabs() {
  *   1. 最后一行数据之后放两行常驻统计行：
  *        「最新-历史最高」= 该列最新一天的值 − 全列历史最高（负数 = 比最高点低多少个百分点）
  *        「最新-历史最低」= 该列最新一天的值 − 全列历史最低（正数 = 比最低点高多少个百分点）
- *      覆盖列：股息率 / 有知有行股息率 / 理杏仁 / 融资余额(亿) / 融资余额/流通市值
+ *      覆盖列按 TAB_COLS 按分表区分
  *      （表头存在就装，空列显示空、来数自动生效；统计行数字格式按 COL_FORMATS 区分）。
  *      公式区间 = 列$2 : INDEX(列,ROW()-k)，即「第 2 行到统计行上一行」：
  *      doPost 把新行插到统计行之前时统计行下移、ROW() 自动跟随，区间永远恰好盖住
@@ -259,8 +260,16 @@ function migrateSplitTabs() {
  *   3. 冻结第 1 行表头（统计行随表尾滚动，不再冻结）。
  */
 function setupDividendStats() {
-  const TABS = ["上证红利", "中证红利", "红利低波", "红利低波100"];
-  const YIELD_COLS = ["股息率", "有知有行股息率", "理杏仁", "融资余额(亿)", "融资余额/流通市值"];
+  // tab → 参与统计/高亮的列：红利4分表=股息率3列+两融2列；宽基/创业板4分表只做两融2列(2026-08-04扩)
+  const MARGIN_COLS = ["融资余额(亿)", "融资余额/流通市值"];
+  const DIVIDEND_COLS = ["股息率", "有知有行股息率", "理杏仁"].concat(MARGIN_COLS);
+  const TAB_COLS = {
+    "上证红利": DIVIDEND_COLS, "中证红利": DIVIDEND_COLS,
+    "红利低波": DIVIDEND_COLS, "红利低波100": DIVIDEND_COLS,
+    "沪深300": MARGIN_COLS, "中证500": MARGIN_COLS,
+    "中证1000": MARGIN_COLS, "创业板": MARGIN_COLS
+  };
+  const TABS = Object.keys(TAB_COLS);
   // 统计行数字格式按列区分：股息率类默认百分比2位；融资余额=亿元2位小数；占比列本身3位小数粒度
   const COL_FORMATS = {"融资余额(亿)": "0.00", "融资余额/流通市值": "0.000%"};
   const LABEL_HIGH = "最新-历史最高";
@@ -312,7 +321,7 @@ function setupDividendStats() {
       return !_isExtremeRule(r);
     });
     const newRules = [];
-    YIELD_COLS.forEach(function(colName) {
+    TAB_COLS[tabName].forEach(function(colName) {
       const ci = header.indexOf(colName);
       if (ci === -1) {
         Logger.log(tabName + " / " + colName + ": 表头无此列，跳过");
