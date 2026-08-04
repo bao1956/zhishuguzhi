@@ -247,7 +247,8 @@ function migrateSplitTabs() {
  *   1. 最后一行数据之后放两行常驻统计行：
  *        「最新-历史最高」= 该列最新一天的值 − 全列历史最高（负数 = 比最高点低多少个百分点）
  *        「最新-历史最低」= 该列最新一天的值 − 全列历史最低（正数 = 比最低点高多少个百分点）
- *      覆盖列：股息率 / 有知有行股息率 / 理杏仁（表头存在就装，空列显示空、来数自动生效）。
+ *      覆盖列：股息率 / 有知有行股息率 / 理杏仁 / 融资余额(亿) / 融资余额/流通市值
+ *      （表头存在就装，空列显示空、来数自动生效；统计行数字格式按 COL_FORMATS 区分）。
  *      公式区间 = 列$2 : INDEX(列,ROW()-k)，即「第 2 行到统计行上一行」：
  *      doPost 把新行插到统计行之前时统计行下移、ROW() 自动跟随，区间永远恰好盖住
  *      全部数据且不含统计行自身（避免循环引用/自我污染）。
@@ -259,7 +260,9 @@ function migrateSplitTabs() {
  */
 function setupDividendStats() {
   const TABS = ["上证红利", "中证红利", "红利低波", "红利低波100"];
-  const YIELD_COLS = ["股息率", "有知有行股息率", "理杏仁"];
+  const YIELD_COLS = ["股息率", "有知有行股息率", "理杏仁", "融资余额(亿)", "融资余额/流通市值"];
+  // 统计行数字格式按列区分：股息率类默认百分比2位；融资余额=亿元2位小数；占比列本身3位小数粒度
+  const COL_FORMATS = {"融资余额(亿)": "0.00", "融资余额/流通市值": "0.000%"};
   const LABEL_HIGH = "最新-历史最高";
   const LABEL_LOW = "最新-历史最低";
   const GRID_ROWS = 5000; // 条件格式规则铺到的行数
@@ -299,8 +302,8 @@ function setupDividendStats() {
     sheet.getRange(statRow, 1).setValue(LABEL_HIGH);
     sheet.getRange(statRow + 1, 1).setValue(LABEL_LOW);
     sheet.getRange(statRow, 1, 2, 1).setFontWeight("bold");
-    sheet.getRange(statRow, 1).setNote("该列最新一天的股息率 − 全部历史最高值（负数 = 比最高点低多少个百分点）");
-    sheet.getRange(statRow + 1, 1).setNote("该列最新一天的股息率 − 全部历史最低值（正数 = 比最低点高多少个百分点）");
+    sheet.getRange(statRow, 1).setNote("该列最新一天的值 − 全列历史最高值（负数 = 比最高点低多少）");
+    sheet.getRange(statRow + 1, 1).setNote("该列最新一天的值 − 全列历史最低值（正数 = 比最低点高多少）");
 
     const header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
 
@@ -325,7 +328,7 @@ function setupDividendStats() {
         const agg = k === 0 ? "MAX" : "MIN";
         sheet.getRange(statRow + k, n).setFormula("=IFERROR(" + latest + "-" + agg + "(" + rng + '),"")');
       }
-      sheet.getRange(statRow, n, 2, 1).setNumberFormat("0.00%");
+      sheet.getRange(statRow, n, 2, 1).setNumberFormat(COL_FORMATS[colName] || "0.00%");
 
       // 高亮只认「A 列是日期」的数据行；MAXIFS/MINIFS 按 A>0 把统计行/空行排除出极值
       const ruleRange = sheet.getRange(L + "2:" + L + sheet.getMaxRows());
