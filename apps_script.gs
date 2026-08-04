@@ -22,6 +22,9 @@
  *     否则计入 skipped 丢弃。保证日期只能在表尾累加，绝不在末尾插入乱序的历史日期。
  *   - deleteKeys: [[keyVal,...], ...] → 按 keyCols 精确匹配删除整行（自底向上），
  *     发生在 upsert 之前；配 rows:[] 可作纯清理调用。
+ *
+ * 追加位置：若 tab 里有 setupDividendStats 的表尾统计行（日期列=「最新-历史最高」），
+ * 新行一律插在统计行之前，让统计行永远钉在最新数据之后；无统计行的 tab 仍是纯表尾追加。
  */
 
 function doPost(e) {
@@ -154,7 +157,20 @@ function doPost(e) {
     });
 
     if (toAppend.length > 0) {
-      sheet.getRange(sheet.getLastRow() + 1, 1, toAppend.length, existingHeader.length).setValues(toAppend);
+      // 统计行钉在表尾：有统计行的 tab 把新行插到统计行之前，其余 tab 原样表尾追加
+      let statRow = -1;
+      if (dateColIdx !== undefined) {
+        for (let r = 1; r < existing.length; r++) {
+          if (_toKeyVal(existing[r][dateColIdx]) === "最新-历史最高") { statRow = r + 1; break; }
+        }
+      }
+      if (statRow > 0) {
+        // insertRowsAfter(上一行) 让新行继承数据行格式；insertRowsBefore 会继承统计行的加粗
+        sheet.insertRowsAfter(statRow - 1, toAppend.length);
+        sheet.getRange(statRow, 1, toAppend.length, existingHeader.length).setValues(toAppend);
+      } else {
+        sheet.getRange(sheet.getLastRow() + 1, 1, toAppend.length, existingHeader.length).setValues(toAppend);
+      }
     }
 
     return _resp({status: "ok", sheet: sheetName, updated: updated, appended: appended, skipped: skipped, deleted: deleted});
@@ -178,7 +194,7 @@ function _resp(obj) {
  * 在 Apps Script 编辑器里选中本函数点「运行」即可（无需重新部署）。
  * 分表不存在则创建；已存在则 clearContents 后全量重建（幂等）。
  * tab 名与 fetch_index_valuation.py 的 INDEX_TABS 保持一致。
- * 注意：重跑本函数会清掉 setupDividendStats() 装的第 2/3 行统计行，
+ * 注意：重跑本函数会清掉 setupDividendStats() 装的表尾统计行，
  *       跑完必须再跑一次 setupDividendStats() 复位（它会自愈重装）。
  */
 function migrateSplitTabs() {
@@ -223,28 +239,29 @@ function migrateSplitTabs() {
 
 /**
  * 一次性/可重跑：给 4 个红利分表（上证红利/中证红利/红利低波/红利低波100）装
- * 「最新 vs 历史极值」统计行 + 全列最大/最小值自动高亮。
- * 在 Apps Script 编辑器里选中本函数点「运行」即可（无需重新部署）。
+ * 「最新 vs 历史极值」统计行（钉在表尾、最新数据之后）+ 全列最大/最小值自动高亮。
+ * 在 Apps Script 编辑器里选中本函数点「运行」即可；但配套的「新行插到统计行之前」
+ * 逻辑在 doPost 里，doPost 有改动时必须重新部署 Web App 才对线上生效。
  *
- * 做的事（幂等，可反复运行修复/扩列）：
- *   1. 表头下插入两行常驻统计行（第 2/3 行，数据从第 4 行开始）：
- *        第2行「最新-历史最高」= 该列最新一天的值 − 全列历史最高（负数 = 比最高点低多少个百分点）
- *        第3行「最新-历史最低」= 该列最新一天的值 − 全列历史最低（正数 = 比最低点高多少个百分点）
+ * 做的事（幂等，可反复运行修复/扩列；会自动把旧版装在第 2/3 行的统计行迁到表尾）：
+ *   1. 最后一行数据之后放两行常驻统计行：
+ *        「最新-历史最高」= 该列最新一天的值 − 全列历史最高（负数 = 比最高点低多少个百分点）
+ *        「最新-历史最低」= 该列最新一天的值 − 全列历史最低（正数 = 比最低点高多少个百分点）
  *      覆盖列：股息率 / 有知有行股息率 / 理杏仁（表头存在就装，空列显示空、来数自动生效）。
- *      公式用 4:末 开放区间引用整列数据，新追加的行自动纳入计算；
- *      而日更（蛋卷/理杏仁/大V温度）全部按「日期+代码」upsert、新行只追加到表尾，
- *      这两行日期列放的是文字标签、没有代码键，永远不会被 webhook 命中或覆盖。
- *   2. 上述每列装两条条件格式：全列最大值黄底、最小值蓝底，数据一变自动重算重标。
- *      规则区间铺到第 5000 行并把网格先扩到 5000 行（日频 ≈ 2045 年才用满），
- *      保证日更追加的新行永远落在规则区间内、不会因网格扩容脱标。
- *   3. 冻结前 3 行，滚动看历史时表头 + 统计行常驻。
+ *      公式区间 = 列$2 : INDEX(列,ROW()-k)，即「第 2 行到统计行上一行」：
+ *      doPost 把新行插到统计行之前时统计行下移、ROW() 自动跟随，区间永远恰好盖住
+ *      全部数据且不含统计行自身（避免循环引用/自我污染）。
+ *      统计行日期列是文字标签、没有代码键，webhook 的 upsert/删除永远不会命中它们。
+ *   2. 每列装两条条件格式：全列最大值黄底、最小值蓝底，数据一变自动重算重标。
+ *      极值用 MAXIFS/MINIFS 按「A 列是日期(数值>0)」过滤，统计行和空行既不参与
+ *      极值计算也不会被高亮。规则区间铺到第 5000 行并把网格先扩到 5000 行。
+ *   3. 冻结第 1 行表头（统计行随表尾滚动，不再冻结）。
  */
 function setupDividendStats() {
   const TABS = ["上证红利", "中证红利", "红利低波", "红利低波100"];
   const YIELD_COLS = ["股息率", "有知有行股息率", "理杏仁"];
   const LABEL_HIGH = "最新-历史最高";
   const LABEL_LOW = "最新-历史最低";
-  const DATA_START = 4;   // 第 2/3 行是统计行，数据从第 4 行开始
   const GRID_ROWS = 5000; // 条件格式规则铺到的行数
   const YELLOW = "#ffff00";
   const BLUE = "#6fa8dc";
@@ -257,29 +274,37 @@ function setupDividendStats() {
       return;
     }
 
-    // 1) 幂等插入统计行：A2 已是标签说明装过，只刷新公式与规则
-    if (String(sheet.getRange(2, 1).getValue()).trim() !== LABEL_HIGH) {
-      sheet.insertRowsBefore(2, 2);
-      // 防止继承表头/日期格式；顺带清掉 migrateSplitTabs 重建后漂移到数据行的旧注释
-      sheet.getRange(2, 1, 2, sheet.getMaxColumns()).clearFormat();
-      sheet.getRange(4, 1, 2, 1).clearNote();
-      sheet.getRange(2, 1).setValue(LABEL_HIGH);
-      sheet.getRange(3, 1).setValue(LABEL_LOW);
+    // 0) 旧版布局（统计行在第 2/3 行）：先拆掉，数据重新从第 2 行开始
+    if (String(sheet.getRange(2, 1).getValue()).trim() === LABEL_HIGH) {
+      sheet.deleteRows(2, 2);
     }
-    sheet.getRange(2, 1, 2, 1).setFontWeight("bold");
-    sheet.getRange(2, 1).setNote("该列最新一天的股息率 − 全部历史最高值（负数 = 比最高点低多少个百分点）");
-    sheet.getRange(3, 1).setNote("该列最新一天的股息率 − 全部历史最低值（正数 = 比最低点高多少个百分点）");
+    sheet.setFrozenRows(1);
 
-    // 网格扩到 GRID_ROWS，保证日更追加的新行始终落在条件格式区间内
+    // 网格扩到 GRID_ROWS，保证日更插入的新行始终落在条件格式区间内
     if (sheet.getMaxRows() < GRID_ROWS) {
       sheet.insertRowsAfter(sheet.getMaxRows(), GRID_ROWS - sheet.getMaxRows());
     }
 
+    // 1) 定位已有的表尾统计行；没有就紧跟最后一行数据新建
+    const lastRow = sheet.getLastRow();
+    let statRow = -1;
+    if (lastRow >= 2) {
+      const aVals = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+      for (let i = 0; i < aVals.length; i++) {
+        if (String(aVals[i][0]).trim() === LABEL_HIGH) { statRow = i + 2; break; }
+      }
+    }
+    if (statRow === -1) statRow = lastRow + 1;
+    sheet.getRange(statRow, 1, 2, sheet.getMaxColumns()).clearFormat();
+    sheet.getRange(statRow, 1).setValue(LABEL_HIGH);
+    sheet.getRange(statRow + 1, 1).setValue(LABEL_LOW);
+    sheet.getRange(statRow, 1, 2, 1).setFontWeight("bold");
+    sheet.getRange(statRow, 1).setNote("该列最新一天的股息率 − 全部历史最高值（负数 = 比最高点低多少个百分点）");
+    sheet.getRange(statRow + 1, 1).setNote("该列最新一天的股息率 − 全部历史最低值（正数 = 比最低点高多少个百分点）");
+
     const header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
 
-    // 2) 逐股息率列装统计公式，并重建极值高亮规则（先摘掉旧装的，保留无关规则）。
-    //    表头存在就装：暂时没数据的列（如刚扩列还没回填的理杏仁）公式经 IFERROR 显示空、
-    //    高亮对空单元格恒不命中，数据一到自动生效，无需重跑。
+    // 2) 逐股息率列装统计公式，并重建极值高亮规则（先摘掉旧装的，保留无关规则）
     const keptRules = sheet.getConditionalFormatRules().filter(function(r) {
       return !_isExtremeRule(r);
     });
@@ -292,36 +317,37 @@ function setupDividendStats() {
       }
       const n = ci + 1;
       const L = _colLetter(n);
-      const open = L + "$" + DATA_START + ":" + L; // 开放区间，新追加的行自动纳入
-      // 该列最后一个非空值 = 最新一天；范围运算必须套 ARRAYFORMULA，裸 LOOKUP 会被隐式交集打成 #N/A
-      const latest = 'ARRAYFORMULA(LOOKUP(2,1/(' + open + '<>""),' + open + '))';
-      sheet.getRange(2, n).setFormula("=IFERROR(" + latest + "-MAX(" + open + '),"")');
-      sheet.getRange(3, n).setFormula("=IFERROR(" + latest + "-MIN(" + open + '),"")');
-      sheet.getRange(2, n, 2, 1).setNumberFormat("0.00%");
+      for (let k = 0; k < 2; k++) {
+        // 区间兜到统计行上一行为止：第 1 统计行 ROW()-1、第 2 统计行 ROW()-2
+        const rng = L + "$2:INDEX(" + L + ":" + L + ",ROW()-" + (k + 1) + ")";
+        // 区间最后一个非空值 = 最新一天；范围运算必须套 ARRAYFORMULA，裸 LOOKUP 会被隐式交集打成 #N/A
+        const latest = 'ARRAYFORMULA(LOOKUP(2,1/(' + rng + '<>""),' + rng + '))';
+        const agg = k === 0 ? "MAX" : "MIN";
+        sheet.getRange(statRow + k, n).setFormula("=IFERROR(" + latest + "-" + agg + "(" + rng + '),"")');
+      }
+      sheet.getRange(statRow, n, 2, 1).setNumberFormat("0.00%");
 
-      const cell = L + DATA_START;
-      const ruleRange = sheet.getRange(cell + ":" + L + sheet.getMaxRows());
+      // 高亮只认「A 列是日期」的数据行；MAXIFS/MINIFS 按 A>0 把统计行/空行排除出极值
+      const ruleRange = sheet.getRange(L + "2:" + L + sheet.getMaxRows());
       newRules.push(SpreadsheetApp.newConditionalFormatRule()
-        .whenFormulaSatisfied('=AND(' + cell + '<>"",' + cell + '=MAX(' + open + '))')
+        .whenFormulaSatisfied('=AND(ISNUMBER($A2),' + L + '2<>"",' + L + '2=MAXIFS(' + L + '$2:' + L + ',$A$2:$A,">0"))')
         .setBackground(YELLOW).setRanges([ruleRange]).build());
       newRules.push(SpreadsheetApp.newConditionalFormatRule()
-        .whenFormulaSatisfied('=AND(' + cell + '<>"",' + cell + '=MIN(' + open + '))')
+        .whenFormulaSatisfied('=AND(ISNUMBER($A2),' + L + '2<>"",' + L + '2=MINIFS(' + L + '$2:' + L + ',$A$2:$A,">0"))')
         .setBackground(BLUE).setRanges([ruleRange]).build());
-      Logger.log(tabName + " / " + colName + "（" + L + " 列）: 统计行 + 高亮已装");
+      Logger.log(tabName + " / " + colName + "（" + L + " 列）: 表尾统计行 + 高亮已装");
     });
     sheet.setConditionalFormatRules(keptRules.concat(newRules));
-
-    // 3) 表头 + 统计行常驻
-    sheet.setFrozenRows(3);
   });
 }
 
-/** 识别 setupDividendStats 装的极值高亮规则（自定义公式同时含 "$4:" 和 MAX(/MIN(），幂等重装时先摘除。 */
+/** 识别 setupDividendStats 装的极值高亮规则（新版含 MAXIFS/MINIFS，旧版含 "$4:"+MAX(/MIN(），幂等重装时先摘除。 */
 function _isExtremeRule(rule) {
   const bc = rule.getBooleanCondition();
   if (!bc || bc.getCriteriaType() !== SpreadsheetApp.BooleanCriteria.CUSTOM_FORMULA) return false;
   const vals = bc.getCriteriaValues();
   const f = vals && vals.length ? String(vals[0]) : "";
+  if (f.indexOf("MAXIFS(") !== -1 || f.indexOf("MINIFS(") !== -1) return true;
   return f.indexOf("$4:") !== -1 && (f.indexOf("MAX(") !== -1 || f.indexOf("MIN(") !== -1);
 }
 
