@@ -6,8 +6,9 @@
   按 stockCode 单指数查询，startDate 必填，单次区间 ≤10 年。
   已实测（2026-08-04，Actions run 30874184960）四个红利指数全覆盖、日频更新到前一交易日。
 
-只写 4 个红利分表（上证红利/中证红利/红利低波/红利低波100），不写总表「指数价格」——
-用户口径：两融只在红利分表单独展示。两列表头由 Apps Script 自动扩列追加在各分表表尾。
+只写 8 个指数分表（沪深300/中证500/中证1000/创业板/上证红利/中证红利/红利低波/红利低波100），
+不写总表「指数价格」——用户口径：两融只在分表单独展示。
+两列表头由 Apps Script 自动扩列追加在各分表表尾。
 
 写入约束与 fetch_lixinger.py 相同：appendMode="tailOnly"，按「日期+代码」upsert，
 早于表内首日的历史行 / 窗口内表里没有的旧日期一律 skipped，绝不在表尾插乱序旧行。
@@ -39,8 +40,13 @@ COL_BAL = "融资余额(亿)"
 COL_RATIO = "融资余额/流通市值"
 HEADERS = ["日期", "代码", "名称", COL_BAL, COL_RATIO]
 
-# 与 fetch_lixinger.py INDICES 同口径（code=表内「代码」列取值，stock_code=开放平台参数）
+# code=表内「代码」列取值（对齐 migrateSplitTabs 的 SPLIT_TABS），stock_code=开放平台参数
+# 2026-08-04 从红利 4 分表扩展到全部 8 个指数分表
 INDICES = [
+    {"code": "SH000300", "name": "沪深300", "stock_code": "000300", "tab": "沪深300"},
+    {"code": "SH000905", "name": "中证500", "stock_code": "000905", "tab": "中证500"},
+    {"code": "SH000852", "name": "中证1000", "stock_code": "000852", "tab": "中证1000"},
+    {"code": "SZ399006", "name": "创业板", "stock_code": "399006", "tab": "创业板"},
     {"code": "SH000015", "name": "上证红利", "stock_code": "000015", "tab": "上证红利"},
     {"code": "SH000922", "name": "中证红利", "stock_code": "000922", "tab": "中证红利"},
     {"code": "CSIH30269", "name": "红利低波", "stock_code": "H30269", "tab": "红利低波"},

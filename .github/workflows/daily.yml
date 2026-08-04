@@ -80,7 +80,7 @@ jobs:
           TY_START_DATE: ${{ github.event.inputs.ty_start_date }}
         run: python fetch_treasury_yield.py
 
-      - name: Push 融资余额两列到红利分表
+      - name: Push 融资余额两列到指数分表
         if: github.event_name != 'push'
         env:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
