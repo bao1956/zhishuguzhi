@@ -5,6 +5,7 @@
 用完连分支一起删。
 """
 import datetime
+import gzip
 import json
 import os
 import urllib.request
@@ -18,11 +19,14 @@ def post(path, payload):
     req = urllib.request.Request(
         BASE + path,
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "Accept-Encoding": "gzip"},
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read())
+            raw = r.read()
+            if r.headers.get("Content-Encoding") == "gzip":
+                raw = gzip.decompress(raw)
+            return json.loads(raw)
     except urllib.error.HTTPError as e:
         return {"httpError": e.code, "body": e.read().decode()[:800]}
     except Exception as e:  # noqa: BLE001
