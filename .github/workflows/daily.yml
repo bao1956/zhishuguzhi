@@ -31,6 +31,10 @@ on:
         description: "两融列起始日 YYYY-MM-DD（回填/区间修复用，默认近14天）"
         required: false
         default: ""
+      pp_start_date:
+        description: "收盘价/涨跌幅百分位起始日 YYYY-MM-DD（回填/区间修复用，默认近14天）"
+        required: false
+        default: ""
   push:
     branches: [main]
     paths:
@@ -87,3 +91,10 @@ jobs:
           LIXINGER_TOKEN: ${{ secrets.LIXINGER_TOKEN }}
           MG_START_DATE: ${{ github.event.inputs.mg_start_date }}
         run: python fetch_margin.py
+
+      - name: Push 收盘价+涨跌幅百分位到指数分表
+        if: github.event_name != 'push'
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          PP_START_DATE: ${{ github.event.inputs.pp_start_date }}
+        run: python fetch_price_percentile.py

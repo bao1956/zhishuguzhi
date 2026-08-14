@@ -353,6 +353,126 @@ function setupDividendStats() {
   });
 }
 
+/**
+ * 一次性（2026-08-14）：3 年历史回填。从仓库 raw 地址拉 history_backfill.json
+ * （由 build_history_backfill.py 生成：收盘价/近半年涨跌幅/涨跌幅百分位(3年)/涨跌幅档位
+ * 日频四列 + 蛋卷 PE/PB 周频 + 有知有行温度周频，2023/8/14 起），合并进 8 个指数分表：
+ *   - 按「日期+代码」命中已有行 → 仅用非空值填对应单元格
+ *   - 未命中 → 插入（统计行之前），然后整个数据区按日期升序整块重写
+ *   - 表头如有新列（收盘价等四列）自动追加到表尾
+ *   - 新列补数字格式；最后把 notes 追加到「说明」tab
+ * 在 Apps Script 编辑器里运行即可，doPost 无改动、无需重新部署。
+ * 幂等可重跑（重复运行时全部命中为 update，不会重复插行）。
+ * 理杏仁/国债/两融列不在本函数内——历史行插好后用 workflow_dispatch 回填（upsert 命中即更新）。
+ */
+function backfillHistoryFromRepo() {
+  const URL = "https://raw.githubusercontent.com/bao1956/zhishuguzhi/main/history_backfill.json";
+  const LABEL_HIGH = "最新-历史最高";
+  const COL_FORMATS = {"收盘价": "0.00", "近半年涨跌幅": "0.00%", "涨跌幅百分位(3年)": "0.0%"};
+
+  const data = JSON.parse(UrlFetchApp.fetch(URL).getContentText());
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const report = [];
+
+  Object.keys(data.tabs).forEach(function(tabName) {
+    const t = data.tabs[tabName];
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) { report.push(tabName + ": tab不存在，跳过"); return; }
+
+    const lastRow = sheet.getLastRow();
+    let header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    let headerChanged = false;
+    t.headers.forEach(function(h) {
+      if (header.indexOf(h) === -1) { header.push(h); headerChanged = true; }
+    });
+    if (headerChanged) sheet.getRange(1, 1, 1, header.length).setValues([header]);
+
+    const existing = sheet.getRange(1, 1, lastRow, header.length).getValues();
+    const colIdx = {};
+    header.forEach(function(h, i) { colIdx[h] = i; });
+    const dIdx = colIdx["日期"], cIdx = colIdx["代码"];
+
+    // 数据行（到统计行为止）
+    let statRow = -1;
+    const dataRows = [];
+    for (let r = 1; r < existing.length; r++) {
+      if (_toKeyVal(existing[r][dIdx]) === LABEL_HIGH) { statRow = r + 1; break; }
+      dataRows.push(existing[r]);
+    }
+
+    const keyIdx = {};
+    dataRows.forEach(function(row, i) {
+      keyIdx[_toKeyVal(row[dIdx]) + "|" + _toKeyVal(row[cIdx])] = i;
+    });
+
+    let updated = 0;
+    const toInsert = [];
+    t.rows.forEach(function(row) {
+      const key = String(row[0]).trim() + "|" + String(row[1]).trim();
+      if (key in keyIdx) {
+        const target = dataRows[keyIdx[key]];
+        let dirty = false;
+        t.headers.forEach(function(h, i) {
+          const v = row[i];
+          if (v !== "" && v !== null && v !== undefined && target[colIdx[h]] !== v) {
+            target[colIdx[h]] = v;
+            dirty = true;
+          }
+        });
+        if (dirty) updated++;
+      } else {
+        const nr = new Array(header.length).fill("");
+        t.headers.forEach(function(h, i) { nr[colIdx[h]] = row[i]; });
+        toInsert.push(nr);
+      }
+    });
+
+    const merged = dataRows.concat(toInsert);
+    merged.sort(function(a, b) {
+      return (_toDateMs(_toKeyVal(a[dIdx])) || 0) - (_toDateMs(_toKeyVal(b[dIdx])) || 0);
+    });
+
+    if (toInsert.length > 0) {
+      // 插在最后一行数据之后（统计行之前），新行继承数据行格式，统计行公式 ROW() 自动跟随
+      const anchor = statRow > 0 ? statRow - 1 : 1 + dataRows.length;
+      sheet.insertRowsAfter(anchor, toInsert.length);
+    }
+    if (merged.length > 0) {
+      sheet.getRange(2, 1, merged.length, header.length).setValues(merged);
+      sheet.getRange(2, dIdx + 1, merged.length, 1).setNumberFormat("yyyy/m/d");
+      Object.keys(COL_FORMATS).forEach(function(colName) {
+        const ci = colIdx[colName];
+        if (ci !== undefined) {
+          sheet.getRange(2, ci + 1, merged.length, 1).setNumberFormat(COL_FORMATS[colName]);
+        }
+      });
+    }
+    report.push(tabName + ": updated=" + updated + " inserted=" + toInsert.length +
+                " total=" + merged.length);
+  });
+
+  // 统计规则与回填口径 → 「说明」tab（重跑防重复：首条已存在则跳过）
+  if (data.notes && data.notes.length) {
+    const s = ss.getSheetByName("说明");
+    if (s) {
+      const head = String(data.notes[0]);
+      const colA = s.getRange(1, 1, s.getLastRow(), 1).getValues().map(function(r) {
+        return String(r[0]);
+      });
+      if (colA.indexOf(head) === -1) {
+        const rows = data.notes.map(function(n) { return [n, "", "", "", "", ""]; });
+        s.getRange(s.getLastRow() + 1, 1, rows.length, 6).setValues(rows);
+        report.push("说明: +" + rows.length + " 行");
+      } else {
+        report.push("说明: 已存在，跳过");
+      }
+    }
+  }
+
+  Logger.log(report.join("\n"));
+  return report.join("; ");
+}
+
 /** 识别 setupDividendStats 装的极值高亮规则（新版含 MAXIFS/MINIFS，旧版含 "$4:"+MAX(/MIN(），幂等重装时先摘除。 */
 function _isExtremeRule(rule) {
   const bc = rule.getBooleanCondition();

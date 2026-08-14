@@ -1,0 +1,35 @@
+name: Build history backfill
+
+# 一次性：生成 3 年历史回填数据包 history_backfill.json 并提交回仓库，
+# 供 Apps Script backfillHistoryFromRepo() 从 raw 地址拉取。手动触发。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Build history_backfill.json
+        env:
+          LIXINGER_TOKEN: ${{ secrets.LIXINGER_TOKEN }}
+        run: python build_history_backfill.py
+
+      - name: Commit & push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add history_backfill.json
+          git commit -m "history_backfill.json：3年历史回填数据包（Actions 生成）" || { echo "无变更"; exit 0; }
+          git push
