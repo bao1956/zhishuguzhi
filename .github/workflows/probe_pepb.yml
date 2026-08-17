@@ -1,0 +1,23 @@
+name: Probe PE/PB calibers
+
+# 临时探针：理杏仁各口径 vs 蛋卷 PE/PB 差异对比，只打日志不写数据。用完删。
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run probe
+        env:
+          LIXINGER_TOKEN: ${{ secrets.LIXINGER_TOKEN }}
+        run: python probe_pepb_calibers.py
