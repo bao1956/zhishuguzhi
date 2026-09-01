@@ -96,5 +96,6 @@ jobs:
         if: github.event_name != 'push'
         env:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          LIXINGER_TOKEN: ${{ secrets.LIXINGER_TOKEN }}
           PP_START_DATE: ${{ github.event.inputs.pp_start_date }}
         run: python fetch_price_percentile.py
